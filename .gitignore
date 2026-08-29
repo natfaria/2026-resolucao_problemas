@@ -1,0 +1,34 @@
+# Ambiente Virtual
+.venv/
+venv/
+env/
+ENV/
+
+# Python (arquivos compilados e cache)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Dados e Modelos (Evita enviar arquivos pesados para o GitHub)
+#data/raw/
+#data/processed/
+#data/interim/
+models/*.pkl
+models/*.h5
+
+# Variáveis de ambiente / Senhas
+.env
+
+
+# macOS (Arquivos do sistema)
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.Trashes
