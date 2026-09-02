@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/Users/ngodeny/Documents/mestrado/2026-resolucao_problemas/.venv/bin/python3 -c ' *)"
+    ]
+  }
+}
