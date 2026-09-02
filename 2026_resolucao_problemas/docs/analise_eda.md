@@ -298,25 +298,26 @@ fora da amostra — não existe nenhum dia de fim de semana no período de teste
 ## Capítulo 11 — Quão Confiável é Esse Número? (Provas de que Há Pouco Dado)
 
 Antes de fechar o modelo, valia provar com número — não só intuição — que "temos pouco dado" é uma
-limitação real, não desculpa.
+limitação real, não desculpa. Esses três testes foram feitos duas vezes: primeiro com o tratamento
+antigo (capping IQR, antes da decisão do Capítulo 7), depois refeitos com o modelo oficial (Huber),
+para garantir que a leitura de incerteza vale para o número que de fato está em uso (-14,10).
 
 - **Curva de aprendizado:** reajustamos a mesma regressão usando cada vez mais dias de treino. Com
-  20 dias, a elasticidade saiu com o **sinal errado** (+7,29 em vez de negativo!). Só a partir de ~50
-  dias o sinal se estabiliza — e mesmo entre 60 e 66 dias, o número ainda estava mudando
-  visivelmente. Ou seja: mais histórico ainda mudaria a conclusão.
+  20 dias, a elasticidade sai com o **sinal errado** (+3,7, quando deveria ser negativo) tanto no
+  modelo antigo quanto no oficial. Só a partir de ~50-60 dias o sinal se estabiliza — e mesmo entre
+  70 e 76 dias, o número oficial ainda muda de -15,03 para -14,10. Ou seja: mais histórico ainda
+  mudaria a conclusão, com qualquer um dos dois tratamentos.
 - **Bootstrap (2.000 simulações de "e se a amostra fosse ligeiramente diferente"):** a elasticidade
-  balança ~14% em torno do seu valor médio só por causa de qual amostra de dias calhou de existir.
-- **Intervalo de confiança:** a faixa de valores plausíveis para a elasticidade final vai de -16,30
-  a -9,48 — mais de 1,7x de diferença entre a ponta de baixo e a de cima.
+  balança ~15% em torno do seu valor médio no modelo oficial (era ~14% no antigo) — praticamente a
+  mesma incerteza relativa. Trocar o tratamento de outlier não piorou nem melhorou a estabilidade,
+  só corrigiu o viés sistemático medido no Capítulo 7.
+- **Intervalo de confiança:** a faixa de valores plausíveis para a elasticidade oficial vai de
+  -17,37 a -10,83 (era -16,30 a -9,48 no modelo antigo) — a mesma largura relativa, só deslocada
+  para o novo valor central.
 
-*(Nota: estes três testes foram feitos com o tratamento antigo, antes da troca para Huber no
-Capítulo 7 — não foram refeitos com a elasticidade final de -14,10. A conclusão qualitativa
-["pouco dado, muita incerteza"] não muda, mas os números exatos acima valem para a elasticidade
--12,90, não para -14,10.)*
-
-**O que isso significa na prática:** o número da elasticidade — seja -12,90 ou -14,10 — é a melhor
-estimativa que temos, mas não é uma verdade fixa: é um valor com uma margem de incerteza real (da
-ordem de 15-20% para mais ou para menos), e essa margem precisa ser levada para a etapa de
+**O que isso significa na prática:** o número da elasticidade (-14,10) é a melhor estimativa que
+temos, mas não é uma verdade fixa: é um valor com uma margem de incerteza real (da ordem de 15-20%
+para mais ou para menos), e essa margem precisa ser levada para a etapa de
 otimização (por exemplo, via cenários ou margem de segurança), não tratada como certeza absoluta.
 
 ---
