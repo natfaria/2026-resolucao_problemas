@@ -1,119 +1,83 @@
-# Análise Detalhada do EDA — Otimização de Precificação (Produto_A, Minerva Foods)
+# A Curva de Demanda do Produto_A: a História de Como Chegamos Nela
 
-**Notebook analisado:** `01-EDA_v3.ipynb` (99 células — 60 de código, 39 de markdown)
-**Período de dados:** 01/08/2025 a 14/11/2025 · **Produto:** Produto_A (1 SKU)
-**Split:** Treino ≤ 31/10/2025 · Teste = 03/11 a 14/11/2025 (10 dias úteis, sem split leakage)
+**Notebook analisado:** `01-EDA_v3.ipynb` · **Produto:** Produto_A (1 SKU, Minerva Foods)
+**Dados:** 01/08/2025 a 14/11/2025 · **Treino:** até 31/10/2025 · **Teste:** 03/11 a 14/11/2025 (10
+dias, nunca usados para decidir nada, só para checar se o modelo acerta)
 
----
-
-## 1. Resumo Executivo
-
-O EDA parte de uma base de 86 registros diários (Volume, Receita, Custo) e chega a um modelo de
-demanda do tipo `Volume = A · Preço⁻ᴮ`, com **elasticidade única (B = 10,76) para todos os dias**
-e **4 patamares de mercado (A)** diferentes: Segunda (Pico), Terça/Quarta/Quinta (Regular), Sexta
-(Fraco) e Sábado/Domingo (Fim de Semana).
-
-O caminho até aqui não foi direto: a primeira hipótese (3 clusters com elasticidades diferentes,
-definida a partir da leitura visual de um boxplot) foi testada formalmente contra 5 alternativas em
-um Torneio de Modelos e **perdeu** — generalizava pior fora da amostra. O modelo final é mais
-simples que o original, e cada escolha foi justificada com um critério objetivo (MAPE fora da
-amostra, BIC, significância estatística), não com interpretação visual.
-
-**Validação final:** o modelo vencedor erra, em média, 56,3% do volume diário fora da amostra —
-bem melhor que um baseline ingênuo (90,2%), mas longe de perfeito. Essa margem de erro deve ser
-levada para a etapa de otimização (não tratar a previsão como certeza).
-
-**Tratamento de outlier — duas premissas testadas formalmente, e sobre os dados corretos:** o
-notebook testa e compara duas formas distintas de definir "outlier" (seção 6 e seção 8). A Premissa
-A (Volume e Preço como variáveis isoladas, capping por IQR) flagra 12 dos 66 dias úteis de treino —
-quase 1 em cada 5. A Premissa B (um ponto é outlier quando o Volume não bate com o que a própria
-curva de elasticidade prevê para aquele preço, via distância de Cook) **precisa ser calculada sobre
-o Volume bruto**, não sobre o Volume já tratado pela Premissa A — senão o próprio capping já teria
-suavizado os pontos extremos antes de procurá-los, e o teste ficaria viesado a favor de "não achar
-nada". Feito corretamente sobre dados brutos, a Premissa B flagra 3 dias, e só 1 deles coincide com
-os 12 da Premissa A. O achado mais revelador: o maior volume de todo o treino (100 kg, 15/10) **não**
-é flagrado pela Premissa B, porque o preço daquele dia também estava perto do mínimo histórico — dado
-o preço, aquele volume é exatamente o que a curva de elasticidade prevê, não uma anomalia. Isso
-confirma, na prática, que a Premissa B é o critério tecnicamente mais adequado para decidir o que
-pesa menos na estimativa de elasticidade. Como efeito colateral, também ficou claro que o capping da
-Premissa A não só remove outliers: ele atenua a elasticidade estimada em ~14% (-14,94 nos dados
-brutos vs. -12,90 nos dados tratados). Detalhes e números completos na seção 8.
+Este documento conta a história de como chegamos ao modelo que hoje calcula "quanto vamos vender se
+cobrarmos X reais por quilo" — e por que descartamos vários outros modelos no caminho. Cada decisão
+aqui foi tomada testando alternativas e comparando números, nunca "no olho".
 
 ---
 
-## 2. Estrutura dos Dados
+## Como ler este documento (glossário rápido)
 
-| Item | Detalhe |
+Este relatório tem gente de perfis diferentes lendo — alguns termos técnicos aparecem bastante, e
+vale explicá-los uma vez aqui em vez de repetir a explicação toda hora:
+
+| Termo | O que significa, em bom português |
 |---|---|
-| Granularidade | Diária, 1 produto (Produto_A) |
-| Colunas originais | Produto, Data, Volume Realizado (kg), Receita Realizada (R$), Custo Realizado (R$) |
-| Variáveis derivadas | Preço = Receita/Volume · Custo (R$/kg) = Custo/Volume · Dia da Semana |
-| Treino | 76 registros (01/08 a 31/10/2025) |
-| Teste | 10 registros, **todos dias úteis** (03/11 a 14/11/2025) |
-| Metas (planilha à parte) | 165 kg/semana, tolerância ±30%, variação máx. de preço R$2/dia entre dias consecutivos |
-
-**Achado estrutural relevante:** de 26 finais de semana possíveis no período de treino, **16 não
-têm nenhum registro** (nem venda zero) — a operação de fim de semana parece esporádica, não uma
-rotina planejada. E, mais relevante ainda: **nenhum dos 6 sábados/domingos do período de teste
-aparece na planilha.** Isso sugere que o horizonte real de precificação do desafio pode ser só os
-10 dias úteis — recomenda-se confirmar esse ponto com quem definiu o desafio antes de assumir que o
-Fim de Semana precisa de preço próprio (ver seção 14, item 9).
+| **Elasticidade** | O quanto o volume vendido reage quando o preço muda. Elasticidade alta = cliente é sensível, um pequeno aumento de preço derruba bastante a venda. Elasticidade baixa = cliente compra quase igual, preço importa menos. |
+| **p-valor** | A chance de uma diferença que vemos nos dados ser só coincidência de amostra, não um padrão real. Quanto **menor**, mais confiável é a diferença. Regra usada aqui: p-valor abaixo de 0,05 (5%) = "essa diferença é real". Acima disso = "pode ser só coincidência, melhor não confiar". |
+| **MAPE** | O erro médio do modelo quando ele tenta prever a venda de um dia que nunca viu. MAPE de 56% quer dizer que, em média, a previsão erra por 56% do valor real — pra mais ou pra menos. Quanto menor, melhor. |
+| **BIC** | Uma "nota de simplicidade": pune modelos que usam variáveis demais sem ganho real de precisão. Entre dois modelos que preveem parecido, o de menor BIC é preferível — é mais simples e menos propenso a "decorar" o passado em vez de aprender o padrão. |
+| **Outlier** | Um dia com resultado muito fora do comum — pode ser erro de registro, promoção, ou evento pontual. |
+| **Cluster / agrupamento** | Juntar dias parecidos num mesmo "balde", com uma única equação por balde, em vez de uma equação diferente pra cada dia da semana. |
+| **Capping por IQR** | Um jeito simples e comum de tratar valor fora do padrão: calcular um teto baseado na variação típica dos dados e "cortar" qualquer valor acima dele para esse teto. |
+| **Regressão robusta (Huber)** | Uma forma alternativa de calcular a curva que, em vez de cortar os pontos fora do padrão antes de começar, deixa o próprio cálculo dar menos peso a eles automaticamente — sem descartar nenhum dado. |
+| **Distância de Cook** | Uma nota, por dia, de "o quanto esse dia sozinho está puxando o resultado final para um lado". Um dia com nota alta é um dia que, se removido, mudaria bastante a conclusão. |
 
 ---
 
-## 3. Preparação e Cuidados Metodológicos
+## Capítulo 1 — O Problema e os Dados que Tínhamos
 
-### 3.1 Split treino/teste sem vazamento de dados
-O corte (31/10/2025) acontece logo após criar `Preço`/`Dia da Semana` (cálculos linha a linha, sem
-risco) e **antes** de qualquer estatística agregada, boxplot, tratamento de outlier ou regressão —
-a ordem correta para evitar que decisões de modelagem "espiem" o futuro.
+A Minerva precisa decidir, todo dia, que preço cobrar por um corte de carne — e isso exige saber
+como o volume vendido reage ao preço (a "curva de demanda"). Recebemos 86 dias de histórico (Volume,
+Receita, Custo), com o objetivo final de alimentar um otimizador de preços que respeita metas
+semanais de venda e um limite de variação de preço entre dias consecutivos.
 
-### 3.2 Cuidado com a variável `Preço` (endogeneidade)
-`Preço = Receita/Volume` é o preço médio **realizado**, não necessariamente o preço de tabela
-definido a priori. Em relações B2B, desconto por volume poderia inflar artificialmente a
-correlação preço↔volume (causalidade reversa). **Teste feito:** correlação Preço×Volume calculada
-**dentro** de cada dia da semana (não misturando dias diferentes):
+**Dois achados de estrutura, antes de qualquer modelo:**
+- De 26 finais de semana possíveis no período de treino, **16 não têm nenhum registro de venda**
+  (nem zero) — parece uma operação esporádica, não uma rotina planejada.
+- **Nenhum dos 6 sábados/domingos do período de teste aparece na planilha.** Isso sugere que o
+  horizonte real de precificação pode ser só os 10 dias úteis — vale confirmar isso com quem definiu
+  o desafio antes de assumir que o Fim de Semana precisa de preço próprio (ver Limitações, item 9).
 
-| Dia | Correlação Preço × Volume |
-|---|---|
-| Segunda | -0,77 |
-| Terça | -0,74 |
-| Quarta | -0,64 |
-| Quinta | -0,83 |
-| Sexta | -0,66 |
+**Dois cuidados tomados logo de cara, para não estragar tudo depois:**
+- **O corte entre treino e teste** foi feito antes de qualquer conta agregada, gráfico ou ajuste de
+  modelo — pra garantir que nenhuma decisão "espiasse" o futuro.
+- **O preço usado é uma média realizada** (Receita ÷ Volume), não necessariamente o preço de tabela.
+  Em vendas B2B, um desconto por volume grande poderia inflar artificialmente a relação
+  preço↔volume. Testamos a correlação preço×volume **dentro de cada dia da semana** (Segunda -0,77,
+  Terça -0,74, Quarta -0,64, Quinta -0,83, Sexta -0,66) — todas fortes e negativas, o que é evidência
+  de sensibilidade real ao preço, não só um efeito de nível entre dias diferentes. Reduz a
+  preocupação, mas não elimina — fica registrado como limitação.
 
-Todas fortes e negativas — evidência de sensibilidade real ao preço, não apenas um efeito de nível
-entre dias diferentes. Isso reduz, mas não elimina, a preocupação com endogeneidade (não há dados
-de pedido individual para confirmar definitivamente). Fica registrado como limitação (seção 14).
-
-### 3.3 Visão cronológica e estabilidade do custo
-Olhar os dados em ordem cronológica (não só agrupados) revelou dois pontos que os gráficos
-agrupados escondiam:
-- **Custo por kg não é perfeitamente estável**: sobe gradualmente de ~R$985 (agosto) para
-  ~R$1.000-1.010 (final de outubro), ~2% de tendência de alta, além de um pico isolado de R$1.030.
-- Esse mesmo período (meados de outubro) concentra uma anomalia muito maior — ver seção 5.
+Olhando os dados em ordem cronológica (não só agrupados por categoria), também notamos que o
+**custo por kg sobe gradualmente** ao longo do período (~985 → ~1.010, quase 2%), então a premissa
+de "custo fixo" usada depois na conta de margem é uma aproximação, não um fato confirmado.
 
 ---
 
-## 4. Testes de Sazonalidade e Padrão Semanal
+## Capítulo 2 — Descartando Pistas Falsas: Sazonalidade
 
-Testados com regressão controlando por `ln(Preço)` e dia da semana: semana do mês (p entre 0,148 e
-0,840), quinzena (p = 0,629) e mês (p entre 0,145 e 0,242) **não são estatisticamente
-significativos** — descartados corretamente, evitando complexidade desnecessária.
+Antes de ir direto pro dia da semana (que já parecia visualmente importante), testamos se outros
+padrões de calendário também importavam: semana do mês, quinzena e mês. Nenhum deles passou no teste
+de p-valor (todos acima de 0,05, controlando por preço) — descartados corretamente, evitando
+complexidade que os dados não sustentam.
 
-**Achado que se tornou decisivo mais adiante:** no mesmo teste, controlando por preço, a
-Quinta-feira **não** saiu significativamente diferente da Quarta-feira (p = 0,768), nem a Terça
-(p = 0,849) — só a Sexta (p < 0,001) e, de forma limítrofe, a Segunda (p = 0,074). Esse resultado já
-continha a pista de que "Segunda+Quinta" como um único grupo ("Pico") era uma hipótese frágil — só
-foi resgatado depois, no Torneio de Modelos (seção 7) e confirmado na defesa do agrupamento vencedor
-(seção 8.1).
+**Um achado que pareceu irrelevante na hora, mas virou decisivo depois:** nesse mesmo teste,
+controlando por preço, **Quinta-feira não saiu diferente de Quarta-feira** (p = 0,768) — nem Terça
+(p = 0,849). Só Sexta (p < 0,001) e, de forma limítrofe, Segunda (p = 0,074) se destacaram. Ou seja:
+desde o início, os dados já sugeriam que "Segunda e Quinta são parecidas" (a hipótese inicial, ver
+Capítulo 4) estava errada — só percebemos isso mais tarde.
 
 ---
 
-## 5. Investigação de Anomalia: o Episódio de 13–24/10
+## Capítulo 3 — Uma Anomalia no Meio do Caminho
 
-A linha do tempo cronológica revelou uma janela de ~2 semanas que concentra praticamente todos os
-valores extremos do dataset inteiro:
+Olhando o histórico em ordem cronológica, um período de ~2 semanas (13 a 24/10) chamou atenção por
+concentrar quase todos os valores extremos do dataset inteiro:
 
 | Extremo | Valor | Data |
 |---|---|---|
@@ -122,381 +86,342 @@ valores extremos do dataset inteiro:
 | Maior preço de todo o treino | R$ 1.365,49 | 24/10/2025 |
 | Maior custo/kg de todo o treino | R$ 1.030,34 | 20/10/2025 |
 
-Padrão observado: 13–16/10 (preços nos mínimos históricos, volumes nos máximos — provável
-promoção) seguido de 17–24/10 (preços disparando até o máximo histórico, volumes caindo a quase
-zero — provável correção). Isso é um **ponto de alavancagem** em potencial: um episódio pontual de
-negócio (não necessariamente um padrão repetível de comportamento do cliente) que pode estar
-distorcendo a elasticidade estimada. Não foi removido do treino (decisão consciente de manter todos
-os dados disponíveis dado o tamanho já pequeno da amostra); seu impacto real é quantificado
-formalmente na seção 8.2.
+O padrão parece ser: 13–16/10 com preço muito baixo e volume muito alto (provável promoção),
+seguido de 17–24/10 com preço disparando e volume caindo a quase zero (provável correção). Isso é o
+tipo de episódio pontual de negócio que pode distorcer a conclusão se pesar demais no cálculo —
+guardamos essa suspeita para testar formalmente mais adiante (Capítulo 7), em vez de decidir
+qualquer coisa sobre ela agora.
 
 ---
 
-## 6. Tratamento de Outliers: Duas Premissas Testadas
+## Capítulo 4 — Primeira Tentativa: Uma Hipótese Lida num Gráfico
 
-"Outlier" esconde duas perguntas diferentes, e o notebook testa as duas formalmente, em vez de
-assumir que uma resolve a outra:
+Olhando um boxplot de volume por dia da semana, a leitura visual mais óbvia foi dividir os dias em 3
+grupos por "tração": Segunda+Quinta como dias de pico, Terça+Quarta como regulares, Sexta como fraco.
+Essa foi a **primeira versão do modelo** — plausível à primeira vista, mas baseada só em olhar o
+gráfico, sem controlar por preço nem testar contra alternativa nenhuma.
 
-- **Premissa A — outlier como propriedade da variável isolada.** Um valor é estranho olhando só
-  para a distribuição da própria variável (ex.: Volume muito acima do que aquele dia da semana
-  costuma vender), sem olhar o preço praticado naquele dia.
-- **Premissa B — outlier como propriedade da curva de elasticidade.** Um valor é estranho quando o
-  Volume observado não bate com o que o modelo Preço→Volume prevê para aquele preço — mesmo que,
-  isoladamente, nem o Volume nem o Preço pareçam extremos.
+Era hora de descobrir se essa leitura visual realmente se sustentava — ou se era só uma impressão.
 
-A Premissa B só pode ser testada depois que existe um modelo ajustado; por isso ela é aplicada
-formalmente na seção 8, depois do Torneio de Modelos. Esta seção trata a Premissa A, que não
-depende de nenhum modelo.
+---
 
-### 6.1 Volume: capping por IQR, por dia da semana
-O tratamento aplicado ao Volume usa o teto do boxplot (Q3 + 1,5·IQR), calculado **dentro de cada
-dia da semana** (não globalmente — uma primeira versão global foi descartada por misturar dias com
-patamares de volume muito diferentes). O teto varia bastante por dia:
+## Capítulo 5 — A Primeira Grande Decisão: Como Agrupar os Dias?
 
-| Dia | Teto calculado (kg) | Queda média após capping |
+Em vez de aceitar a leitura do boxplot, comparamos formalmente 6 candidatos diferentes para "como
+juntar os dias da semana", usando 3 critérios **decididos antes de rodar qualquer coisa**: (1) MAPE
+fora da amostra — o mais importante, é o que decide se a ferramenta funciona de verdade; (2) BIC —
+pune modelo complicado demais; (3) quantos parâmetros realmente se sustentam (p < 0,05). R² **não**
+entrou como critério — ele quase sempre sobe com mais variáveis, mesmo sem o modelo generalizar
+melhor (é fácil "decorar" o passado; o difícil é acertar o futuro).
+
+| Modelo | O que é | MAPE teste | BIC | Veredito |
+|---|---|---|---|---|
+| A: Dia a dia, sem interação | Uma equação por dia, mesma elasticidade pra todos | 55,7% | 90,5 | Perdeu — BIC pior, mais parâmetros que o necessário |
+| B: Dia a dia, com interação | Uma equação por dia, **cada dia com sua própria elasticidade** | 57,7% | 95,2 | Perdeu — overfitting: parece ótimo no papel (maior R²), mas generaliza mal e quase nenhum parâmetro é significativo |
+| C: Hipótese do boxplot, sem interação | Segunda+Quinta / Terça+Quarta / Sexta | 56,4% | 86,9 | Perdeu — pior MAPE e BIC que o vencedor |
+| D: Hipótese do boxplot, com interação | Igual a C, mas com elasticidade própria por grupo | **60,3%** | 88,1 | Perdeu — **pior MAPE de todos os candidatos sérios**, apesar de parecer mais sofisticado |
+| **E: Segunda isolada + Terça/Quarta/Quinta juntas** | Uma hipótese alternativa, cogitada por termos visto o achado do Capítulo 2 | 56,5% | **82,3** | 🏆 **Venceu** — melhor BIC, 2º melhor MAPE, mais parâmetros significativos |
+| F: Só preço, sem diferenciar dia | Ignora completamente o dia da semana | 125,1% | 146,1 | Perdeu de longe — confirma que dia da semana importa muito |
+
+**Por que E ganhou e não A (que teve o melhor MAPE de todos)?** Boa pergunta, e vale explicar: A
+prevê ligeiramente melhor nos 10 dias de teste, mas isso pode ser sorte de amostra pequena (só 10
+dias) — A usa mais parâmetros (uma "gaveta" pra cada dia) do que os dados conseguem sustentar com
+confiança (o BIC penaliza exatamente isso). É como comparar um terno sob medida que serve bem hoje
+com um terno de tamanho padrão que serve quase tão bem em qualquer dia — o sob medida corre mais
+risco de não servir mais amanhã.
+
+A hipótese original do boxplot (C e D) **perdeu** — a leitura visual "Segunda+Quinta parecidas" não
+se sustentou. O vencedor (E) isola Segunda como grupo próprio e junta Terça+Quarta+Quinta — batendo
+com a pista que já tínhamos visto no Capítulo 2.
+
+**O modelo vencedor desta rodada** (ainda sem Fim de Semana, ainda com o tratamento de outlier que
+vamos questionar no próximo capítulo):
+```
+elasticidade = -12,90   (extremamente significativo)
+Segunda (Pico)   +0,37  (significativo)
+Sexta (Fraco)    -1,23  (extremamente significativo)
+```
+
+---
+
+## Capítulo 6 — Confirmando o Agrupamento Vencedor (Não Confiar Só no Torneio)
+
+O grupo "Terça+Quarta+Quinta juntas" mereceu uma checagem extra: um gráfico anterior parecia mostrar
+Quarta e Quinta bem separadas em alguns pontos. Isolamos só esse trio (mais poder estatístico do que
+testar todos os dias de uma vez) e comparamos Quarta e Quinta contra Terça, controlando por preço:
+nenhuma diferença com p-valor abaixo de 0,05 (Quarta: p=0,825; Quinta: p=0,751) — o "gap" que
+parecia existir no gráfico era só ruído de poucos pontos, não um padrão real. **Essa checagem foi
+refeita mais tarde com o tratamento de outlier oficial (Capítulo 7) e o resultado ficou ainda mais
+claro** — ver detalhe técnico ao final do Capítulo 8.
+
+---
+
+## Capítulo 7 — A Segunda Grande Decisão: O Que Fazer com os Pontos Fora da Curva?
+
+Até aqui, todo modelo usou uma forma de tratar outlier de Volume que nem tinha sido questionada: um
+teto por dia da semana (baseado na variação típica de cada dia), cortando qualquer valor acima dele.
+Essa técnica (chamamos de **Premissa A**) tem um problema conceitual: ela olha só para o Volume,
+**sem olhar o preço daquele dia**. Um volume alto pode ser perfeitamente normal se o preço também
+estava baixo naquele dia — exatamente o comportamento que a própria curva de elasticidade prevê.
+Cortar esse ponto como se fosse erro pode estar "limpando" justamente o sinal mais informativo que
+os dados têm sobre sensibilidade a preço.
+
+Existe uma alternativa mais correta tecnicamente (**Premissa B**): um ponto só é outlier se o Volume
+observado **não bate com o que a própria curva Preço→Volume prevê** para aquele preço — mesmo que,
+olhado sozinho, nem o Volume nem o Preço pareçam estranhos. Só que a Premissa B só pode ser
+calculada depois que já existe uma curva ajustada — por isso vem depois, não antes.
+
+### O que a Premissa A estava fazendo, em números
+O teto de capping varia bastante por dia (de 3,4 kg no Domingo a 65,8 kg na Quinta), e no total
+flagra 12 dos 66 dias de treino útil — quase 1 em cada 5. Testamos a mesma lógica pela primeira vez
+também no Preço (nunca tinha sido feito): usando só o teto (como fizemos com Volume), o dia de preço
+**mínimo** — a provável promoção do Capítulo 3, o evento mais relevante do dataset — **não seria
+sequer flagrado**, porque é um piso, não um teto. Primeiro sinal de que a Premissa A, do jeito mais
+simples de aplicar, tende a deixar passar exatamente a anomalia mais importante.
+
+### Comparando as duas premissas, com o modelo já ajustado
+Calculamos a Premissa B (distância de Cook, sobre o Volume **bruto** — teria que ser assim, senão o
+capping da Premissa A já teria suavizado os pontos extremos antes mesmo de procurá-los, e o teste
+sairia viciado a favor de "não achar nada"). Resultado: **as duas premissas quase não concordam.** A
+Premissa A flagra 12 dias; a Premissa B flagra só 3, e apenas 1 deles coincide com os 12 da Premissa A.
+
+**O achado mais revelador é o que a Premissa B *não* flagra:** o maior volume de todo o treino
+(100 kg, 15/10) tem uma nota de influência (distância de Cook) de apenas 0,017 — bem abaixo do
+limiar de "atenção" (0,061). Por quê? Porque o preço daquele dia também estava perto do mínimo
+histórico — **dado o preço, aquele volume é exatamente o que a curva prevê, não uma anomalia.**
+Nenhum outro dia do episódio do Capítulo 3 aparece como desproporcionalmente influente para a curva.
+
+Isso é evidência de que **julgar outlier pela relação Preço→Volume é um critério diferente — e mais
+adequado — do que julgar Volume isoladamente.** Como efeito colateral, também descobrimos algo
+importante: o modelo ajustado sobre Volume bruto (sem nenhum tratamento) tem elasticidade -14,94,
+visivelmente diferente da elasticidade -12,90 do modelo com capping. **O capping por IQR não só
+decide o que é outlier — ele também distorce a elasticidade estimada**, o número mais importante
+deste projeto inteiro.
+
+### Um segundo torneio, agora para decidir o tratamento
+Isso levantou a pergunta certa: qual tratamento realmente generaliza melhor pra dados novos? Testamos
+formalmente 4 alternativas, cruzadas com as duas formas de agrupar dia (dia a dia vs. o agrupamento
+vencedor do Capítulo 5), usando o mesmo critério de sempre (MAPE fora da amostra, BIC, significância):
+
+| Tratamento | O que é | MAPE teste (agrupado) | Veredito |
+|---|---|---|---|
+| **Atual (capping IQR)** | Corta os valores acima do teto antes de ajustar qualquer modelo | 56,5% | Era o tratamento em uso — bom, mas não o melhor |
+| **Bruto** | Não trata outlier nenhum | 56,5% | Empata em erro, mas perde em BIC — abandonar o tratamento sem pôr nada no lugar não ajuda |
+| **Remoção pela curva** | Descobre os pontos influentes (Premissa B) e os remove do treino | 57,4% | **Perdeu** — com pouco dado, descartar informação dói mais do que ajuda |
+| **Regressão robusta (Huber)** | Cada ponto é automaticamente reponderado pelo tamanho do seu próprio "erro" — nenhum dado é descartado | 56,3% | 🏆 **Venceu** — iguala/supera o atual, sem descartar dado, sem precisar de um teto arbitrário |
+
+**Por que "remover pela curva" perdeu, se ela identifica os pontos certos?** Porque nossa amostra é
+pequena (66-76 dias). Remover até poucos pontos reduz ainda mais o quanto o modelo tem para aprender
+— o mesmo motivo pelo qual decidimos manter o episódio do Capítulo 3 no treino em vez de excluí-lo
+(Capítulo 9). A regressão robusta resolve isso de um jeito mais esperto: em vez de excluir, ela só
+"escuta menos" o ponto estranho, sem perder a observação inteira.
+
+---
+
+## Capítulo 8 — Confirmando os Grupos com Estatística, do Zero
+
+Até aqui, os grupos (Segunda sozinha / Terça+Quarta+Quinta juntas / Sexta sozinha) vieram de
+decisões anteriores (leitura de gráfico, depois confirmadas uma a uma). Nesta seção, fizemos o
+caminho inverso, já com o tratamento oficial (Huber): **derivar** o agrupamento certo a partir de um
+único teste de p-valor, em vez de assumir e só confirmar depois.
+
+**Passo 1 — sem agrupar nada:** comparamos cada dia útil contra Quarta-feira (usada como referência),
+controlando por preço:
+
+| Dia (vs. Quarta) | p-valor | Interpretação |
 |---|---|---|
-| Segunda | 54,02 | -3,6% |
-| Terça | 33,37 | -13,3% |
-| Quarta | 46,94 | -16,7% |
-| Quinta | 65,75 | -0,5% |
-| Sexta | 13,89 | -5,4% |
-| Sábado | 3,37 | -2,8% |
-| Domingo | 2,46 | 0,0% |
+| Terça | 0,869 | Não dá pra dizer que é diferente de Quarta — junta |
+| Quinta | 0,971 | Não dá pra dizer que é diferente de Quarta — junta |
+| Segunda | 0,071 | Levemente acima do limite de 0,05 — parece diferente, mas sozinho o teste não confirma |
+| Sexta | < 0,001 | Claramente diferente — grupo próprio |
 
-Essa variável tratada (`Volume Tratado`) é a que alimenta todas as regressões do restante do
-notebook — incluindo o Torneio de Modelos e a exportação para a etapa de modelagem seguinte
-(`02-modelagem.ipynb`), o que limita o quanto essa escolha pode ser revisitada sem propagar
-mudanças para essa etapa posterior.
+**Passo 2 — juntar quem não é diferente, e testar de novo com mais gente na base:** ao juntar
+Terça+Quarta+Quinta num único grupo de referência, a base do teste passa a ter 39 dias em vez de só
+os ~13 de Quarta isolada — mais dado, mais precisão para detectar diferenças reais. Refazendo o
+teste com essa base maior, Segunda passa de p=0,071 (Passo 1, inconclusivo) para **p=0,037**
+(Passo 2, agora sim confirmado). O mesmo efeito real estava lá — só precisava de uma base mais
+robusta para aparecer com clareza.
 
-### 6.2 Testando a mesma pergunta para o Preço (pela primeira vez)
-O Preço nunca havia sido testado para outliers. Aplicando a mesma lógica de IQR, mas dos dois lados
-(piso e teto, já que um preço promocional é um piso, não um teto):
+**A lição, em uma frase:** o agrupamento Segunda / Terça+Quarta+Quinta / Sexta não foi um palpite —
+foi calculado, e o próprio ato de agrupar os dias parecidos aumentou nossa capacidade de confirmar
+os dias que são de fato diferentes.
 
-- **Volume:** 11 dias flagrados (piso ou teto, por dia da semana).
-- **Preço:** 3 dias flagrados.
-- **União (Volume e/ou Preço):** 12 dias, quase 1 em cada 5 dias de treino útil.
-
-**Achado metodológico importante:** o capping usado na modelagem (seção 6.1) só corta o teto do
-Volume. Se o mesmo critério de só-teto fosse aplicado ao Preço, o dia de preço **mínimo** — a
-provável promoção de 11/10, o evento mais relevante do dataset (seção 5) — **não seria flagrado**,
-porque ele é um piso, não um teto. Isso é o primeiro indício de que a Premissa A, na forma mais
-simples de aplicar, tende a deixar passar exatamente o tipo de anomalia mais relevante neste caso.
-A comparação definitiva contra a Premissa B está na seção 8.2.
+*(Detalhe técnico: o teste de Quarta/Quinta do Capítulo 6, refeito com este mesmo tratamento
+oficial, deu p=0,887 e p=0,882 — ainda mais longe de significativo do que antes. A conclusão não
+dependia do tratamento antigo.)*
 
 ---
 
-## 7. Torneio de Modelos: a Decisão Mais Importante do Notebook
+## Capítulo 9 — Quanto do Resultado Vem Só da Anomalia do Capítulo 3?
 
-### 7.1 O problema
-A primeira versão do modelo definia 3 clusters (Pico = Segunda+Quinta, Regular = Terça+Quarta,
-Fraco = Sexta) a partir da leitura visual de um boxplot de volume médio bruto — sem controlar por
-preço. Uma hipótese alternativa de agrupamento (Segunda isolada; Terça+Quarta+Quinta juntas) foi
-levantada e precisava ser testada com o mesmo rigor.
+A pergunta ficou em aberto desde o Capítulo 3: será que aquele episódio de 13 dias com preço/volume
+extremos está distorcendo a elasticidade calculada? O Capítulo 7 já deu uma resposta indireta (a
+curva não trata esses dias como anomalia). Aqui damos a resposta direta: reajustamos o modelo
+**removendo** esses dias do treino e comparamos.
 
-### 7.2 O critério
-Definido **antes** de rodar qualquer coisa: (1) MAPE fora da amostra — o mais importante; (2) BIC —
-penaliza complexidade desnecessária, apropriado com poucos dados; (3) quantos parâmetros realmente
-se sustentam estatisticamente (p < 0,05). R² não foi usado como critério de decisão (sobe quase
-sempre com mais variáveis, mesmo sem generalizar melhor).
-
-### 7.3 Os 6 candidatos testados
-
-| Modelo | R² | AIC | BIC | MAPE teste | Nº parâm. |
-|---|---|---|---|---|---|
-| A: Dia a dia (aditivo, sem interação) | 0,741 | 77,4 | 90,5 | 55,7% | 6 |
-| B: Dia a dia (com interação, 1 elasticidade/dia) | 0,784 | 73,3 | 95,2 | 57,7% | 10 |
-| C: Cluster oficial (sem interação) | 0,722 | 78,1 | 86,9 | 56,4% | 4 |
-| **D: Cluster oficial (com interação) — modelo original** | 0,751 | 74,9 | 88,1 | **60,3%** | 6 |
-| **E: Cluster Alternativo (sem interação) — VENCEDOR** | 0,741 | **73,5** | **82,3** | 56,5% | 4 |
-| F: Só preço, sem diferenciar dia | 0,226 | 141,7 | 146,1 | 125,1% | 2 |
-
-### 7.4 Leitura dos resultados
-- **F** confirma que dia da semana importa muito (erro de 125% sem ele).
-- **B** é o exemplo clássico de overfitting: maior R² (0,784), mas pior BIC e poucos parâmetros
-  significativos — complexidade que não se sustenta com o tanto de dado disponível.
-- **D (o modelo original)** tem o **pior MAPE fora da amostra entre os candidatos sérios** —
-  adicionar a interação preço×cluster piorou a generalização, apesar de parecer mais sofisticado.
-- **E venceu ou empatou em quase todos os critérios**: melhor BIC, 2º melhor MAPE, maior proporção
-  de parâmetros significativos (3 de 4). O agrupamento Terça+Quarta+Quinta que sustenta o modelo E
-  é examinado em detalhe na seção 8.1.
-
-### 7.5 O modelo vencedor (na época, 3 grupos + fim de semana ainda fora)
-```
-const       95,29   (p < 0,001)
-ln_Preço   -12,90   (p < 0,001)  — elasticidade única para todos os dias
-Fraco (Sexta) -1,23 (p < 0,001)
-Pico (Segunda) +0,37 (p = 0,007)
-```
-R² = 0,741 · N = 66 (dias úteis de treino)
-
----
-
-## 8. Defesa do Modelo Vencedor: Trio, Diagnóstico de Outlier e Impacto do Episódio
-
-Três testes de robustez sobre o modelo vencedor do Torneio, encadeados: primeiro confirma-se que o
-agrupamento escolhido é estatisticamente sólido (8.1); depois aplica-se formalmente a Premissa B de
-outlier, comparando-a lado a lado com a Premissa A da seção 6 (8.2); por fim quantifica-se
-diretamente o quanto o episódio de 13–24/10 pesa na estimativa (8.3), fechando o ciclo aberto nas
-seções 5 e 6.
-
-### 8.1 O trio Terça/Quarta/Quinta é mesmo parecido?
-As curvas ajustadas **dia a dia** (uma regressão isolada por dia, poucos pontos cada) pareciam
-mostrar Quarta e Quinta bem separadas logo no início da faixa de preço. Isolando só o trio (mais
-poder estatístico do que testar todos os dias de uma vez) e controlando por preço:
-
-```
-is_Quarta (vs. Terça): p = 0,825
-is_Quinta (vs. Terça): p = 0,751
-```
-
-Nenhuma diferença estatisticamente sustentável. Os resíduos do modelo vencedor, separados por dia,
-confirmam a mesma conclusão:
-
-| Dia | Erro médio | Desvio-padrão |
+| | Nº de dias no treino | Elasticidade |
 |---|---|---|
-| Terça | -0,033 | 0,337 |
-| Quarta | +0,008 | 0,465 |
-| Quinta | +0,025 | 0,515 |
+| Com o episódio | 66 | -12,90 |
+| **Sem o episódio** | 56 | **-10,63** |
 
-As diferenças médias entre os dias (0,008 a 0,033) são pequenas frente ao desvio-padrão de cada um
-(0,34 a 0,52) — a variação **dentro** de cada dia é bem maior que a diferença **entre** eles. O gap
-visto nas curvas ajustadas dia a dia reflete a instabilidade de ajustar poucos pontos isoladamente
-(o mesmo problema do candidato B do Torneio), não uma diferença estrutural real — o que sustenta
-manter os três dias juntos no modelo vencedor.
-
-### 8.2 Premissa A vs. Premissa B, lado a lado: o teste de outlier na curva de elasticidade
-Com o modelo vencedor em mãos, a Premissa B (seção 6) pode finalmente ser calculada: distância de
-Cook e resíduos estudentizados sobre a própria regressão Preço→Volume.
-
-**Cuidado metodológico decisivo:** esse diagnóstico precisa ser calculado sobre o Volume **bruto**,
-não sobre o `Volume Tratado` da seção 6.1 — usar o dado já tratado contaminaria o teste, porque o
-próprio capping da Premissa A já teria suavizado os pontos extremos antes mesmo de a Premissa B
-procurar por eles. Por isso, um modelo equivalente ao vencedor (mesmo agrupamento, mesma
-especificação) foi reajustado sobre `Volume Realizado (kg)` sem nenhum tratamento, só para este
-diagnóstico — o modelo usado no restante do notebook continua sendo o `modelo_vencedor`, sobre
-Volume tratado.
-
-**Resultado:** as duas premissas quase não concordam.
-
-- **Premissa A** (marginal, seção 6.2) flagra 12 dos 66 dias — quase 1 em cada 5.
-- **Premissa B** (curva de elasticidade, sobre dados brutos) flagra **3 dias** acima do limiar
-  prático de distância de Cook (4/n = 0,061): Quarta 06/08 (0,066), Segunda 18/08 (0,098) e Sexta
-  10/10 (0,066). Só o dia de 10/10 é flagrado pelas duas premissas ao mesmo tempo.
-
-**O achado mais revelador é o que a Premissa B *não* flagra**: o maior volume de todo o treino
-(100 kg, 15/10 — o próprio ponto que motivou a investigação da seção 5) tem distância de Cook de
-apenas 0,017, bem abaixo do limiar. O motivo: o preço daquele dia também estava perto do mínimo
-histórico — dado o preço, aquele volume é exatamente o que a curva de elasticidade prevê, não uma
-anomalia. Nenhum outro dia do episódio de 13–24/10 aparece como desproporcionalmente influente para
-a curva (um deles, 13/10, tem distância de Cook não-computável — NaN — por instabilidade numérica
-do estimador *leave-one-out* nessa amostra pequena, o que é uma limitação conhecida da técnica em N
-baixo, não um sinal de outlier).
-
-**Leitura técnica:** isso é evidência direta de que julgar outlier pela própria relação Preço→Volume
-é um critério diferente — e, para o objetivo de estimar elasticidade, mais adequado — do que julgar
-Volume e Preço isoladamente. O "volume alto" do episódio é consistente com o preço praticado naquele
-dia; a curva de elasticidade não o trata como anômalo, mesmo que a distribuição marginal do Volume
-trate. Em outras palavras: **a Premissa A, usada na modelagem (seção 6.1), tende a superestimar o
-número de outliers "reais"** em relação ao que a própria curva considera influente.
-
-**Achado adicional (efeito colateral da Premissa A):** o modelo de diagnóstico sobre Volume bruto
-tem elasticidade -14,94 — visivelmente mais negativa que a do modelo vencedor sobre Volume tratado
-(-12,90). O capping por IQR não só decide o que é outlier: ele também **atenua a elasticidade
-estimada em cerca de 14%**, um efeito colateral a levar em conta na leitura do coeficiente final
-(seção 13, limitações).
-
-### 8.3 Quanto da elasticidade vem do episódio de 13–24/10?
-Reajustando o modelo vencedor **removendo** os 10 dias úteis do episódio do treino:
-
-| | N (treino) | Elasticidade | Pico | Fraco | R² |
-|---|---|---|---|---|---|
-| Com o episódio | 66 | -12,90 | 0,369 | -1,233 | 0,741 |
-| **Sem o episódio** | 56 | **-10,63** | 0,365 | -1,204 | 0,699 |
-
-Removendo o episódio, a elasticidade cai ~17,6% em magnitude (-12,90 → -10,63) — um efeito real,
-mas da mesma ordem de grandeza da instabilidade geral já demonstrada pelo bootstrap (seção 9,
-coeficiente de variação ~14%), não um outlier isolado distorcendo o resultado sozinho. Isso é
-consistente com o diagnóstico da seção 8.2: o episódio pesa na estimativa porque desloca o centro
-de massa dos dados (um bloco de dias inteiro com preço anormalmente baixo/alto), não porque algum
-ponto individual seja estatisticamente incompatível com a curva ajustada.
-
-**Decisão tomada:** o episódio permanece no treino — removê-lo reduziria ainda mais uma amostra já
-pequena (de 66 para 56 observações). O valor desta seção é documentar, com número, o quanto essa
-escolha específica pesa no resultado final.
+A elasticidade cai ~18% ao remover o episódio — um efeito real, mas do mesmo tamanho da instabilidade
+geral que já esperávamos ver com uma amostra pequena (Capítulo 11). **Decisão:** manter o episódio no
+treino — removê-lo encolheria ainda mais uma amostra que já é pequena, e o efeito medido não é grande
+o bastante para justificar perder 10 dias de dado.
 
 ---
 
-## 9. Prova Estatística de que Há Poucos Dados
+## Capítulo 10 — E o Fim de Semana?
 
-Três testes independentes, feitos especificamente para não deixar essa afirmação como opinião:
+Sábado e Domingo ficaram de fora de tudo até aqui — só 5 dias de treino cada, menos da metade do que
+já tínhamos por dia útil. Duas perguntas, com necessidades de dado bem diferentes:
 
-### 9.1 Curva de aprendizado
-Reajustando a mesma regressão com quantidades crescentes de dias de treino:
+1. **Fim de semana reage a preço de um jeito diferente?** (elasticidade própria — exige muito dado)
+2. **Fim de semana vende, em média, uma quantidade diferente?** (nível — patamar geral do grupo, exige pouco dado)
 
-| Nº de dias | Elasticidade | IC 95% |
-|---|---|---|
-| 20 | **+7,29** (sinal errado!) | [-19,77, 34,36] |
-| 30 | -4,97 | [-13,69, 3,76] |
-| 40 | -7,14 | [-13,49, -0,80] |
-| 50 | -10,74 | [-15,91, -5,56] |
-| 60 | -13,64 | [-17,68, -9,60] |
-| 66 (tudo) | -12,89 | [-16,30, -9,48] |
+**Pergunta 1: não dá.** Com só 5 dias cada, o Sábado até mostrou uma correlação preço×volume
+**positiva** (economicamente ao contrário do esperado) — sinal claro de que 5 pontos não bastam para
+confiar numa elasticidade própria pro fim de semana.
 
-A estimativa ainda estava mudando visivelmente entre 60 e 66 dias — sinal de que mais histórico
-mudaria a conclusão de novo.
+**Pergunta 2: sim, e com folga.** Comparando "juntar fim de semana com Sexta" vs. "dar um patamar
+próprio para o fim de semana", a segunda opção venceu com folga (BIC 122,7 vs. 166,7). O efeito
+"Fim de Semana" saiu extremamente significativo (p < 0,001) mesmo com só 10 dias no total — reforça
+a mesma lição do Capítulo 5: **um patamar (nível) é muito mais fácil de confirmar com pouco dado do
+que uma elasticidade.**
 
-### 9.2 Bootstrap (2.000 reamostragens)
-Simulando "e se tivéssemos coletado uma amostra ligeiramente diferente de dias":
+Isso deu origem ao **4º grupo** do modelo final: Fim de Semana, com patamar próprio, mesma
+elasticidade dos outros grupos. **Limitação que fica em aberto:** essa equação não pôde ser validada
+fora da amostra — não existe nenhum dia de fim de semana no período de teste (Capítulo 1).
 
-| Coeficiente | Coef. de variação |
+---
+
+## Capítulo 11 — Quão Confiável é Esse Número? (Provas de que Há Pouco Dado)
+
+Antes de fechar o modelo, valia provar com número — não só intuição — que "temos pouco dado" é uma
+limitação real, não desculpa.
+
+- **Curva de aprendizado:** reajustamos a mesma regressão usando cada vez mais dias de treino. Com
+  20 dias, a elasticidade saiu com o **sinal errado** (+7,29 em vez de negativo!). Só a partir de ~50
+  dias o sinal se estabiliza — e mesmo entre 60 e 66 dias, o número ainda estava mudando
+  visivelmente. Ou seja: mais histórico ainda mudaria a conclusão.
+- **Bootstrap (2.000 simulações de "e se a amostra fosse ligeiramente diferente"):** a elasticidade
+  balança ~14% em torno do seu valor médio só por causa de qual amostra de dias calhou de existir.
+- **Intervalo de confiança:** a faixa de valores plausíveis para a elasticidade final vai de -16,30
+  a -9,48 — mais de 1,7x de diferença entre a ponta de baixo e a de cima.
+
+*(Nota: estes três testes foram feitos com o tratamento antigo, antes da troca para Huber no
+Capítulo 7 — não foram refeitos com a elasticidade final de -14,10. A conclusão qualitativa
+["pouco dado, muita incerteza"] não muda, mas os números exatos acima valem para a elasticidade
+-12,90, não para -14,10.)*
+
+**O que isso significa na prática:** o número da elasticidade — seja -12,90 ou -14,10 — é a melhor
+estimativa que temos, mas não é uma verdade fixa: é um valor com uma margem de incerteza real (da
+ordem de 15-20% para mais ou para menos), e essa margem precisa ser levada para a etapa de
+otimização (por exemplo, via cenários ou margem de segurança), não tratada como certeza absoluta.
+
+---
+
+## Capítulo 12 — O Campeão e o Vice-Campeão
+
+Juntando as duas grandes decisões (Capítulo 5: como agrupar os dias; Capítulo 7: como tratar
+outlier) e a extensão para o fim de semana (Capítulo 10), chegamos ao modelo final. **Ao todo, 19
+modelos diferentes foram ajustados e comparados ao longo desta análise** (a lista completa, com a
+descrição de cada um e por que perdeu, está no notebook, seção final "Comparativo de Todos os
+Modelos Testados").
+
+### 🏆 Campeão
+**4 grupos (Segunda / Terça+Quarta+Quinta / Sexta / Fim de Semana), elasticidade única, ajustado por
+regressão robusta de Huber sobre Volume bruto.**
+- Erra, em média, **56,1%** do volume diário em dias que nunca viu.
+- Não descarta nenhum dia de dado.
+- Não depende de um teto de corte decidido antes de existir qualquer modelo.
+- Mantém todos os efeitos (Segunda, Sexta, Fim de Semana) estatisticamente confirmados.
+
+### 🥈 Vice-Campeão
+**O mesmo agrupamento de 4 grupos, mas com o tratamento antigo (capping IQR) — na prática, era o
+modelo que estava em uso até essa análise.**
+- Erra, em média, **56,3%** — só 0,2 ponto percentual pior que o campeão. Pelo erro de previsão
+  sozinho, os dois são quase empatados.
+- **O que desempata:** o vice-campeão tem um problema escondido — ele **subestima em ~30% o quanto o
+  cliente reage ao preço** (elasticidade -10,76 contra -14,10 do campeão), porque o corte de outlier
+  "limpa" justamente os dias de preço/volume mais extremos, que são os mais informativos sobre
+  sensibilidade a preço. Isso não aparece no MAPE (que mede erro de previsão pontual), mas importa
+  demais para um otimizador de preços — que decide o preço olhando exatamente para o tamanho dessa
+  reação.
+
+**Por que não escolher pelo MAPE sozinho, já que os dois empatam quase?** Porque a elasticidade é o
+número que o otimizador vai usar para decidir *quanto* mudar o preço — um erro de 30% nesse número
+específico é muito mais grave para a decisão final do que 0,2 ponto percentual de MAPE. É a mesma
+lição do Capítulo 5 (candidato A quase empatava em MAPE com o vencedor, mas foi descartado por um
+motivo mais profundo que o próprio MAPE não captura).
+
+*(Um "bronze" honrado: dentro do Torneio de agrupamento — Capítulo 5 — o candidato "dia a dia"
+teve o menor MAPE de todos (55,7%), mas foi descartado por complexidade não sustentada pelos dados,
+não por erro de previsão.)*
+
+---
+
+## Capítulo 13 — Testando Contra a Realidade
+
+Depois de decidir tudo com base no treino, o teste final é o mais honesto: aplicar o modelo campeão
+nos 10 dias de novembro que nunca foram usados para decidir nada.
+
+| Modelo | Erro médio nos 10 dias de teste |
 |---|---|
-| Elasticidade (modelo vencedor, sem interação) | 13,7% |
-| Efeito Pico (Segunda) | 24,0% |
-| Efeito Fraco (Sexta) | 11,4% |
+| Baseline ingênuo (média histórica por dia, ignora o preço) | 90,2% |
+| Modelo antigo (vice-campeão, capping IQR) | 56,3% |
+| **Modelo campeão (Huber)** | **56,1%** |
 
-### 9.3 Largura do intervalo de confiança
-IC de 95% da elasticidade final: [-16,30, -9,48] — mais de 1,7x de diferença entre a ponta de baixo
-e a de cima.
-
-**Conclusão:** as três evidências contam a mesma história de ângulos diferentes. Isso não invalida
-o modelo, mas define quanto de confiança depositar nele daqui pra frente (não tratar como número
-definitivo).
+O modelo campeão bate o baseline ingênuo por 34 pontos percentuais — prova de que o preço carrega
+informação real sobre a demanda. Ainda assim, ~56% de erro médio é alto em termos absolutos: a
+etapa de otimização não deve tratar a previsão de volume como um número certo, e sim considerar essa
+margem de erro na decisão (cenários, margem de segurança, otimização robusta em vez de um único
+número "de ponto").
 
 ---
 
-## 10. Fim de Semana: Nível Próprio, Elasticidade Impossível de Estimar
+## Capítulo 14 — Limitações (para constar no relatório final)
 
-### 10.1 A pergunta certa dividida em duas
-1. Fim de semana reage a preço diferente? (elasticidade própria — exige muito dado)
-2. Fim de semana vende, em média, quantidade diferente? (nível próprio — exige pouco dado)
-
-### 10.2 Pergunta 1: não dá
-Correlação Preço×Volume dentro do próprio dia (N=5 cada):
-
-| Dia | N | Correlação |
-|---|---|---|
-| Sábado | 5 | **+0,86** (sinal economicamente invertido) |
-| Domingo | 5 | -0,45 (fraca, não confiável com N=5) |
-
-### 10.3 Pergunta 2: sim, e com folga
-Comparando "juntar com Sexta" vs "nível próprio" (76 dias de treino, incluindo fim de semana):
-
-| Abordagem | R² | AIC | BIC |
-|---|---|---|---|
-| Fim de semana junto com Sexta | 0,691 | 157,4 | 166,7 |
-| **Fim de semana com nível próprio** | **0,836** | **111,0** | **122,7** |
-
-O coeficiente `FimDeSemana` sai com **p < 0,001** (t = -16,4) — extremamente significativo, mesmo
-com só 10 observações no total. Reforça o mesmo princípio da seção 7: **níveis são muito mais
-fáceis de estimar com pouco dado do que elasticidades.**
-
-### 10.4 Modelo final com 4 grupos (76 dias de treino)
-```
-const         79,97   (p < 0,001)
-ln_Preço     -10,76   (p < 0,001)  — elasticidade única, atualizada
-Fraco (Sexta) -1,23   (p < 0,001)  — praticamente igual ao modelo de 3 grupos
-Pico (Segunda) +0,36  (p = 0,022)  — praticamente igual ao modelo de 3 grupos
-FimDeSemana   -2,83   (p < 0,001)  — novo
-```
-R² = 0,836 · N = 76 (todos os dias de treino)
-
-A elasticidade mudou de -12,90 para -10,76 ao incluir o fim de semana no ajuste — variação dentro
-da faixa de instabilidade já demonstrada na seção 9, não motivo de alarme.
-
-**Checagem de segurança:** validado que incluir o fim de semana no ajuste **não piora** a
-performance nos dias úteis (MAPE = 56,3%, praticamente igual ao 56,5% anterior).
-
-**Limitação que fica em aberto:** a equação do Fim de Semana **não pôde ser validada fora da
-amostra** — não existe nenhum dia de fim de semana no período de teste (ver seção 2).
-
----
-
-## 11. Modelo Final: as 4 Equações de Demanda
-
-$$Volume = A \cdot \text{Preço}^{-10{,}76}$$
-
-| Grupo | Dias | A (nível) | Equação |
-|---|---|---|---|
-| Regular | Terça, Quarta, Quinta | e^79,97 | Volume = e^79,97 · Preço⁻¹⁰·⁷⁶ |
-| Pico | Segunda | e^80,34 | Volume = e^80,34 · Preço⁻¹⁰·⁷⁶ |
-| Fraco | Sexta | e^78,74 | Volume = e^78,74 · Preço⁻¹⁰·⁷⁶ |
-| Fim de Semana | Sábado, Domingo | e^77,14 | Volume = e^77,14 · Preço⁻¹⁰·⁷⁶ ⚠️ não validado |
-
-**Faixa de preço observada por grupo (fora dela = extrapolação):**
-
-| Grupo | Mín. | Máx. | N (treino) |
-|---|---|---|---|
-| Fim de Semana | R$ 1.188,86 | R$ 1.354,19 | 10 |
-| Fraco | R$ 1.208,37 | R$ 1.365,49 | 14 |
-| Pico | R$ 1.220,47 | R$ 1.352,42 | 13 |
-| Regular | R$ 1.201,63 | R$ 1.344,63 | 39 |
-
-Um modelo estatístico só "aprendeu" o que já observou: usar essas equações para simular um preço
-fora da faixa observada em cada grupo é extrapolação, sem garantia estatística.
-
----
-
-## 12. Validação Final Fora da Amostra
-
-| Modelo | MAPE (10 dias de teste) |
-|---|---|
-| Baseline ingênuo (média histórica por dia, sem olhar preço) | 90,2% |
-| **Modelo vencedor (4 grupos, elasticidade única)** | **56,3%** |
-
-O modelo bate o baseline com folga (quase 34 pontos percentuais de melhora), confirmando que o
-preço carrega informação real sobre a demanda. Ainda assim, 56,3% de erro médio é um número alto
-em termos absolutos — a etapa de otimização não deve tratar a previsão de volume como um valor
-certo, e sim considerar essa margem de erro na decisão (ex.: margem de segurança, cenários, ou
-otimização robusta em vez de point forecast).
-
----
-
-## 13. Síntese das Limitações (para constar no relatório final)
-
-1. **Endogeneidade do Preço** não descartada — é média realizada, pode conter causalidade reversa
-   (desconto por volume em pedidos grandes). Testado indiretamente (correlação dentro do dia), mas
-   sem confirmação definitiva por falta de dados de pedido individual.
-2. **Amostra pequena em geral** — 66 a 76 observações de treino, dependendo do corte. Elasticidade
-   ainda não convergiu (curva de aprendizado) e tem coeficiente de variação de ~14% no bootstrap.
-3. **Cluster "Fraco" (Sexta) e "Fim de Semana"** são os grupos com menos dado (14 e 10 observações).
-4. **Episódio de 13-24/10** concentra quase todos os extremos do dataset. O diagnóstico de outlier
-   baseado na curva de elasticidade (seção 8.2) não o considera desproporcionalmente influente, mas
-   o teste direto de remoção (seção 8.3) mostra que ele desloca a elasticidade em ~17,6%
-   (-12,90 → -10,63) — um efeito real, ainda que dentro da faixa de instabilidade geral já
-   documentada. Decisão consciente de mantê-lo no treino, dado o tamanho já pequeno da amostra.
-5. **Tratamento de outlier de Volume (Premissa A, seção 6.1)** é uma prática defensável mas não a
-   mais correta tecnicamente para este problema: é marginal (ignora o preço do dia) e é aplicada
-   antes de existir qualquer modelo. Foi mantida porque já alimenta a etapa de modelagem seguinte
-   (`02-modelagem.ipynb`); o diagnóstico baseado na curva de elasticidade sobre dados brutos
-   (Premissa B, seção 8.2) é o critério tecnicamente mais adequado para decidir influência sobre a
-   elasticidade em si, flagrou um conjunto de dias quase totalmente diferente do da Premissa A, e
-   revelou um efeito colateral concreto: o capping atenua a elasticidade estimada em ~14%
-   (-14,94 nos dados brutos vs. -12,90 nos dados tratados).
-6. **Fim de semana**: nível bem estimado (p<0,001), mas elasticidade impossível de estimar (N=5) e
-   sem qualquer validação fora da amostra (teste não tem nenhum dia de fim de semana).
+1. **Endogeneidade do Preço** não descartada — é uma média realizada, pode conter causalidade
+   reversa (desconto por volume grande). Testado indiretamente (Capítulo 1), sem confirmação
+   definitiva por falta de dado de pedido individual.
+2. **Amostra pequena em geral** — 66 a 76 dias de treino, dependendo do corte. A elasticidade ainda
+   não convergiu (Capítulo 11) e balança ~14% no bootstrap.
+3. **Grupos "Fraco" (Sexta) e "Fim de Semana"** são os com menos dado (14 e 10 dias).
+4. **Episódio de 13-24/10** concentra quase todos os extremos do dataset. A curva de elasticidade
+   não o considera desproporcionalmente influente (Capítulo 7), mas removê-lo do treino desloca a
+   elasticidade em ~18% (Capítulo 9) — um efeito real, mas dentro da instabilidade geral já
+   documentada. Decisão consciente de mantê-lo, dado o tamanho já pequeno da amostra.
+5. **O tratamento antigo de outlier (capping IQR) foi abandonado como decisão oficial** (Capítulo 7):
+   era baseado só no Volume, ignorando o preço do dia, e testado formalmente contra 3 alternativas —
+   perdeu para a regressão robusta de Huber. O capping subestimava a elasticidade em ~30%. A curva
+   oficial (Capítulo 12) já reflete essa troca; `02-modelagem.ipynb` consome exclusivamente o modelo
+   com Huber.
+6. **Fim de semana**: patamar bem estimado (p<0,001), mas elasticidade impossível de estimar (só 5
+   dias por dia da semana) e sem qualquer validação fora da amostra (o teste não tem nenhum dia de
+   fim de semana).
 7. **Custo** tem tendência de alta de ~2% ao longo do período e um pico atípico — a premissa de
    "custo fixo" usada na conta de margem é uma aproximação, não um fato confirmado.
 8. **Faixa de preço observada é estreita** (~14% de amplitude no treino) — qualquer preço simulado
    fora dela na etapa de otimização é extrapolação sem garantia estatística.
-9. **Erro de previsão ainda alto** (56,3% MAPE) mesmo no modelo vencedor — deve ser incorporado
-   como incerteza na etapa de otimização, não ignorado.
-10. **Confirmar com quem definiu o desafio** se o horizonte de precificação realmente inclui os
-    fins de semana — a estrutura do período de teste sugere que talvez não.
+9. **Erro de previsão ainda alto** (56,1% MAPE) mesmo no modelo campeão — deve ser incorporado como
+   incerteza na etapa de otimização, não ignorado.
+10. **Confirmar com quem definiu o desafio** se o horizonte de precificação realmente inclui os fins
+    de semana — a estrutura do período de teste sugere que talvez não (Capítulo 1).
 
 ---
 
-## 14. Recomendações para a Próxima Etapa (Modelagem/Otimização)
+## Capítulo 15 — Recomendações para a Próxima Etapa (Otimização)
 
-- Usar o modelo de 4 grupos com elasticidade única (seção 11) como ponto de partida.
-- Incorporar a incerteza da elasticidade (IC largo, bootstrap) na formulação da otimização — por
-  exemplo, via cenários, otimização robusta, ou uma margem de segurança sobre o volume previsto,
-  em vez de tratar a previsão como determinística.
+- Usar o modelo campeão (Capítulo 12) como ponto de partida — já disponível como código pronto em
+  `src/modeling/demand_curve.py` (`fit_demand_curve`/`predict_volume`), e é o que `02-modelagem.ipynb`
+  consome. A etapa de otimização deve importar dessa mesma função, não recalcular a curva por conta
+  própria, para não divergir da decisão tomada e validada aqui.
+- Incorporar a incerteza da elasticidade (Capítulo 11) na formulação da otimização — por exemplo,
+  via cenários, otimização robusta, ou uma margem de segurança sobre o volume previsto, em vez de
+  tratar a previsão como determinística.
 - Formular a otimização como: maximizar `Σ (Preço_d − Custo_d) · Volume_previsto(Preço_d, grupo_d)`
   sujeito a meta semanal (165kg ±30%) e variação máxima de preço (R$2/dia consecutivo). Dado o
   tamanho pequeno do problema (1 produto, 14 dias), tanto busca em grade quanto otimização não
   linear (`scipy.optimize`) são viáveis.
 - Confirmar o escopo do fim de semana antes de decidir se a 4ª equação entra na otimização.
-- Se uma futura iteração do EDA revisar o tratamento de outlier de Volume, considerar substituir a
-  Premissa A (capping marginal) pela Premissa B (diagnóstico via distância de Cook/resíduos da
-  própria curva) como critério principal — ela se mostrou mais conservadora e mais alinhada ao
-  objetivo de estimar elasticidade (seção 8.2).
