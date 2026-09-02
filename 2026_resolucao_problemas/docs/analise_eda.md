@@ -23,16 +23,21 @@ amostra, BIC, significância estatística), não com interpretação visual.
 bem melhor que um baseline ingênuo (90,2%), mas longe de perfeito. Essa margem de erro deve ser
 levada para a etapa de otimização (não tratar a previsão como certeza).
 
-**Tratamento de outlier — duas premissas testadas formalmente:** o notebook testa e compara duas
-formas distintas de definir "outlier" (seção 6 e seção 8). A Premissa A (Volume e Preço como
-variáveis isoladas, capping por IQR) flagra 12 dos 66 dias úteis de treino — quase 1 em cada 5. A
-Premissa B (um ponto é outlier quando o Volume não bate com o que a própria curva de elasticidade
-prevê para aquele preço, via distância de Cook) flagra só 1 dia, e esse dia **não é** o mesmo que a
-Premissa A flagra com mais destaque. A conclusão prática: a Premissa B é o critério tecnicamente
-mais adequado para decidir o que pesa menos na estimativa de elasticidade, porque julga o ponto
-*dado o preço* — a Premissa A, sozinha, tende a marcar como anômalo um volume alto que é
-perfeitamente consistente com um preço baixo naquele dia (exatamente o comportamento que a curva
-prevê). Detalhes e números completos na seção 8.
+**Tratamento de outlier — duas premissas testadas formalmente, e sobre os dados corretos:** o
+notebook testa e compara duas formas distintas de definir "outlier" (seção 6 e seção 8). A Premissa
+A (Volume e Preço como variáveis isoladas, capping por IQR) flagra 12 dos 66 dias úteis de treino —
+quase 1 em cada 5. A Premissa B (um ponto é outlier quando o Volume não bate com o que a própria
+curva de elasticidade prevê para aquele preço, via distância de Cook) **precisa ser calculada sobre
+o Volume bruto**, não sobre o Volume já tratado pela Premissa A — senão o próprio capping já teria
+suavizado os pontos extremos antes de procurá-los, e o teste ficaria viesado a favor de "não achar
+nada". Feito corretamente sobre dados brutos, a Premissa B flagra 3 dias, e só 1 deles coincide com
+os 12 da Premissa A. O achado mais revelador: o maior volume de todo o treino (100 kg, 15/10) **não**
+é flagrado pela Premissa B, porque o preço daquele dia também estava perto do mínimo histórico — dado
+o preço, aquele volume é exatamente o que a curva de elasticidade prevê, não uma anomalia. Isso
+confirma, na prática, que a Premissa B é o critério tecnicamente mais adequado para decidir o que
+pesa menos na estimativa de elasticidade. Como efeito colateral, também ficou claro que o capping da
+Premissa A não só remove outliers: ele atenua a elasticidade estimada em ~14% (-14,94 nos dados
+brutos vs. -12,90 nos dados tratados). Detalhes e números completos na seção 8.
 
 ---
 
@@ -263,17 +268,29 @@ manter os três dias juntos no modelo vencedor.
 Com o modelo vencedor em mãos, a Premissa B (seção 6) pode finalmente ser calculada: distância de
 Cook e resíduos estudentizados sobre a própria regressão Preço→Volume.
 
-**Resultado:** as duas premissas discordam quase por completo.
+**Cuidado metodológico decisivo:** esse diagnóstico precisa ser calculado sobre o Volume **bruto**,
+não sobre o `Volume Tratado` da seção 6.1 — usar o dado já tratado contaminaria o teste, porque o
+próprio capping da Premissa A já teria suavizado os pontos extremos antes mesmo de a Premissa B
+procurar por eles. Por isso, um modelo equivalente ao vencedor (mesmo agrupamento, mesma
+especificação) foi reajustado sobre `Volume Realizado (kg)` sem nenhum tratamento, só para este
+diagnóstico — o modelo usado no restante do notebook continua sendo o `modelo_vencedor`, sobre
+Volume tratado.
+
+**Resultado:** as duas premissas quase não concordam.
 
 - **Premissa A** (marginal, seção 6.2) flagra 12 dos 66 dias — quase 1 em cada 5.
-- **Premissa B** (curva de elasticidade) flagra só **1 dia** acima do limiar prático de distância de
-  Cook (4/n = 0,061): Segunda, 18/08/2025, com distância de Cook = 0,090.
+- **Premissa B** (curva de elasticidade, sobre dados brutos) flagra **3 dias** acima do limiar
+  prático de distância de Cook (4/n = 0,061): Quarta 06/08 (0,066), Segunda 18/08 (0,098) e Sexta
+  10/10 (0,066). Só o dia de 10/10 é flagrado pelas duas premissas ao mesmo tempo.
 
-Esse único dia **não pertence** ao episódio de 13–24/10. Mais revelador ainda: **nenhum dos dias do
-episódio aparece como desproporcionalmente influente para a curva de elasticidade em si** — a
-distância de Cook de todos eles fica visivelmente abaixo do limiar (ou não pôde ser calculada, por
-instabilidade numérica do estimador *leave-one-out* nessa amostra pequena — uma limitação conhecida
-da técnica em N baixo, não um sinal de outlier).
+**O achado mais revelador é o que a Premissa B *não* flagra**: o maior volume de todo o treino
+(100 kg, 15/10 — o próprio ponto que motivou a investigação da seção 5) tem distância de Cook de
+apenas 0,017, bem abaixo do limiar. O motivo: o preço daquele dia também estava perto do mínimo
+histórico — dado o preço, aquele volume é exatamente o que a curva de elasticidade prevê, não uma
+anomalia. Nenhum outro dia do episódio de 13–24/10 aparece como desproporcionalmente influente para
+a curva (um deles, 13/10, tem distância de Cook não-computável — NaN — por instabilidade numérica
+do estimador *leave-one-out* nessa amostra pequena, o que é uma limitação conhecida da técnica em N
+baixo, não um sinal de outlier).
 
 **Leitura técnica:** isso é evidência direta de que julgar outlier pela própria relação Preço→Volume
 é um critério diferente — e, para o objetivo de estimar elasticidade, mais adequado — do que julgar
@@ -281,6 +298,12 @@ Volume e Preço isoladamente. O "volume alto" do episódio é consistente com o 
 dia; a curva de elasticidade não o trata como anômalo, mesmo que a distribuição marginal do Volume
 trate. Em outras palavras: **a Premissa A, usada na modelagem (seção 6.1), tende a superestimar o
 número de outliers "reais"** em relação ao que a própria curva considera influente.
+
+**Achado adicional (efeito colateral da Premissa A):** o modelo de diagnóstico sobre Volume bruto
+tem elasticidade -14,94 — visivelmente mais negativa que a do modelo vencedor sobre Volume tratado
+(-12,90). O capping por IQR não só decide o que é outlier: ele também **atenua a elasticidade
+estimada em cerca de 14%**, um efeito colateral a levar em conta na leitura do coeficiente final
+(seção 13, limitações).
 
 ### 8.3 Quanto da elasticidade vem do episódio de 13–24/10?
 Reajustando o modelo vencedor **removendo** os 10 dias úteis do episódio do treino:
@@ -444,9 +467,11 @@ otimização robusta em vez de point forecast).
 5. **Tratamento de outlier de Volume (Premissa A, seção 6.1)** é uma prática defensável mas não a
    mais correta tecnicamente para este problema: é marginal (ignora o preço do dia) e é aplicada
    antes de existir qualquer modelo. Foi mantida porque já alimenta a etapa de modelagem seguinte
-   (`02-modelagem.ipynb`); o diagnóstico baseado na curva de elasticidade (Premissa B, seção 8.2) é
-   o critério tecnicamente mais adequado para decidir influência sobre a elasticidade em si, e
-   mostrou resultados bem diferentes da Premissa A.
+   (`02-modelagem.ipynb`); o diagnóstico baseado na curva de elasticidade sobre dados brutos
+   (Premissa B, seção 8.2) é o critério tecnicamente mais adequado para decidir influência sobre a
+   elasticidade em si, flagrou um conjunto de dias quase totalmente diferente do da Premissa A, e
+   revelou um efeito colateral concreto: o capping atenua a elasticidade estimada em ~14%
+   (-14,94 nos dados brutos vs. -12,90 nos dados tratados).
 6. **Fim de semana**: nível bem estimado (p<0,001), mas elasticidade impossível de estimar (N=5) e
    sem qualquer validação fora da amostra (teste não tem nenhum dia de fim de semana).
 7. **Custo** tem tendência de alta de ~2% ao longo do período e um pico atípico — a premissa de
